@@ -1,0 +1,52 @@
+:root {
+  /* Celadon water by day */
+  --water: #d3e2db;
+  --water-hi: #f4f9f6;
+  --water-lo: #93b2a5;
+  --ink: #1d3a39;
+  --ink-soft: #44615e;
+  --petal: #cc4a6c;
+  --petal-hi: #fff4f6;
+
+  --display: 'Shippori Mincho', 'Hiragino Mincho ProN', 'Yu Mincho', serif;
+  --sans: 'Zen Kaku Gothic New', 'Hiragino Sans', system-ui, sans-serif;
+
+  color-scheme: light;
+  font: 400 16px/1.5 var(--sans);
+  color: var(--ink);
+  background: var(--water);
+  font-synthesis: none;
+  text-rendering: optimizeLegibility;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+}
+
+@media (prefers-color-scheme: dark) {
+  :root {
+    /* The same pond at night */
+    --water: #12292c;
+    --water-hi: #3d6d68;
+    --water-lo: #040c0d;
+    --ink: #d4e7de;
+    --ink-soft: #93b3aa;
+    --petal: #f08aa5;
+    --petal-hi: #fff0f4;
+    color-scheme: dark;
+  }
+}
+
+* {
+  box-sizing: border-box;
+}
+
+html,
+body {
+  margin: 0;
+  background: var(--water);
+}
+
+button,
+input {
+  font: inherit;
+  color: inherit;
+}

@@ -1,0 +1,258 @@
+.water {
+  position: fixed;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  display: block;
+  cursor: crosshair;
+}
+
+/*
+  Desktop: the name runs down the left like a book spine, the board sits in the
+  middle, and the controls hang off its lower right corner.
+*/
+.pond {
+  --gutter: 40px;
+  --gap: 40px;
+  --spine: 96px;
+  --panel: 232px;
+  --board: min(
+    680px,
+    calc(100svh - 2 * var(--gutter)),
+    calc(100vw - 2 * var(--gutter) - 2 * var(--gap) - var(--spine) - var(--panel))
+  );
+
+  position: relative;
+  min-height: 100svh;
+  display: grid;
+  grid-template-columns: var(--spine) var(--board) var(--panel);
+  column-gap: var(--gap);
+  justify-content: center;
+  align-content: center;
+  padding: var(--gutter);
+  pointer-events: none;
+}
+
+.title {
+  justify-self: end;
+  align-self: start;
+  margin: -6px 0 0;
+  writing-mode: vertical-rl;
+  font-family: var(--display);
+  font-weight: 500;
+  font-size: 96px;
+  line-height: 1;
+  letter-spacing: 0.04em;
+  color: var(--ink);
+  user-select: none;
+}
+
+.board {
+  width: var(--board);
+  aspect-ratio: 1;
+  display: grid;
+  grid-template-columns: repeat(16, 1fr);
+  grid-template-rows: repeat(16, 1fr);
+  touch-action: none;
+  user-select: none;
+  -webkit-user-select: none;
+  cursor: pointer;
+  pointer-events: auto;
+}
+
+/* The canvas draws the notes; these buttons give them a hit area and keyboard focus. */
+.cell {
+  appearance: none;
+  background: none;
+  border: 0;
+  padding: 0;
+  margin: 0;
+  border-radius: 50%;
+  cursor: inherit;
+  -webkit-tap-highlight-color: transparent;
+
+  &:focus-visible {
+    outline: 2px solid var(--ink);
+    outline-offset: -2px;
+  }
+}
+
+.panel {
+  align-self: end;
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 22px;
+  pointer-events: auto;
+}
+
+.play {
+  display: inline-flex;
+  align-items: center;
+  gap: 10px;
+  height: 48px;
+  min-width: 116px;
+  padding: 0 24px 0 20px;
+  border: 0;
+  border-radius: 24px;
+  background: var(--ink);
+  color: var(--water);
+  font-weight: 500;
+  font-size: 17px;
+  cursor: pointer;
+  transition: transform 120ms ease-out;
+
+  &:active {
+    transform: scale(0.97);
+  }
+}
+
+.tempo,
+.scales {
+  display: grid;
+  gap: 6px;
+  width: 100%;
+  margin: 0;
+  padding: 0;
+  border: 0;
+  font-size: 15px;
+}
+
+.tempo {
+  grid-template-columns: 1fr auto;
+  align-items: center;
+
+  span {
+    color: var(--ink-soft);
+  }
+
+  output {
+    color: var(--ink);
+    font-variant-numeric: tabular-nums;
+    text-align: right;
+  }
+
+  input {
+    grid-column: 1 / -1;
+    width: 100%;
+    margin: 0;
+    accent-color: var(--ink);
+    cursor: pointer;
+  }
+}
+
+.scales > span {
+  color: var(--ink-soft);
+}
+
+.scale-options {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 2px 4px;
+  margin-left: -8px;
+
+  button {
+    padding: 4px 8px;
+    border: 0;
+    border-radius: 0;
+    background: none;
+    color: var(--ink-soft);
+    font-size: 15px;
+    cursor: pointer;
+    transition: color 120ms ease-out;
+
+    &:hover {
+      color: var(--ink);
+    }
+
+    &[aria-pressed='true'] {
+      color: var(--ink);
+      font-weight: 700;
+      box-shadow: inset 0 -2px 0 var(--petal);
+    }
+
+    &:focus-visible {
+      outline: 2px solid var(--ink);
+      outline-offset: 1px;
+      border-radius: 4px;
+    }
+  }
+}
+
+.hint {
+  margin: 0;
+  padding-top: 18px;
+  border-top: 1px solid color-mix(in srgb, var(--ink) 20%, transparent);
+  font-size: 14px;
+  line-height: 1.55;
+  color: var(--ink-soft);
+}
+
+.actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 2px;
+  margin: -10px 0 -6px -10px;
+
+  button {
+    padding: 6px 10px;
+    border: 0;
+    border-radius: 8px;
+    background: none;
+    color: var(--ink);
+    font-size: 15px;
+    font-weight: 500;
+    cursor: pointer;
+
+    &:hover {
+      background: color-mix(in srgb, var(--ink) 10%, transparent);
+    }
+  }
+}
+
+.play:focus-visible,
+.actions button:focus-visible,
+.tempo input:focus-visible {
+  outline: 2px solid var(--ink);
+  outline-offset: 3px;
+}
+
+/* Narrow screens: name on top, board full width, controls underneath. */
+@media (max-width: 900px) {
+  .pond {
+    --gutter: 16px;
+    --board: min(600px, calc(100vw - 2 * var(--gutter)));
+
+    grid-template-columns: var(--board);
+    row-gap: 20px;
+    align-content: start;
+  }
+
+  .title {
+    justify-self: start;
+    margin: 4px 0 -4px;
+    writing-mode: horizontal-tb;
+    font-size: 52px;
+  }
+
+  .panel {
+    display: grid;
+    grid-template-columns: auto 1fr;
+    align-items: center;
+    gap: 20px 24px;
+    padding-bottom: 24px;
+  }
+
+  .scales,
+  .hint,
+  .actions {
+    grid-column: 1 / -1;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .play,
+  .scale-options button {
+    transition: none;
+  }
+}
