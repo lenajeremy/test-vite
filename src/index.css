@@ -5,8 +5,17 @@
   --water-lo: #93b2a5;
   --ink: #1d3a39;
   --ink-soft: #44615e;
-  --petal: #cc4a6c;
-  --petal-hi: #fff4f6;
+  --flash: #fff6f8;
+
+  /* One colour per section, each at least 3:1 on the water */
+  --s0: #cc4a6c; /* lotus */
+  --s1: #6a4fb3; /* iris */
+  --s2: #2f6fa8; /* lake */
+  --s3: #c2571a; /* koi */
+  --s4: #4f7a2a; /* moss */
+  --s5: #946700; /* ochre */
+  --s6: #9a3d8f; /* plum */
+  --s7: #1f7a72; /* reed */
 
   --display: 'Shippori Mincho', 'Hiragino Mincho ProN', 'Yu Mincho', serif;
   --sans: 'Zen Kaku Gothic New', 'Hiragino Sans', system-ui, sans-serif;
@@ -29,8 +38,16 @@
     --water-lo: #040c0d;
     --ink: #d4e7de;
     --ink-soft: #93b3aa;
-    --petal: #f08aa5;
-    --petal-hi: #fff0f4;
+    --flash: #fff4f7;
+
+    --s0: #f08aa5;
+    --s1: #b9a4f5;
+    --s2: #7fb8ec;
+    --s3: #f2a06e;
+    --s4: #a6d57a;
+    --s5: #e6c25c;
+    --s6: #e29ad8;
+    --s7: #6fd0c4;
     color-scheme: dark;
   }
 }

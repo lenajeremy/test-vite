@@ -1,70 +1,76 @@
 import { useEffect, useRef, useState } from 'react'
-import type { KeyboardEvent, PointerEvent } from 'react'
-import { COLS, Engine, ROWS, SCALES } from './audio'
+import type { CSSProperties, KeyboardEvent, PointerEvent } from 'react'
+import { Engine, ROWS, SCALES } from './audio'
+import type { NoteEvent } from './audio'
 import { Water } from './water'
 import type { RGB } from './water'
+import {
+  INSTRUMENTS,
+  LANES,
+  LENGTHS,
+  MAX_BPM,
+  MAX_SECTIONS,
+  MIN_BPM,
+  SLOTS,
+  SLOT_STEPS,
+  STEPS_PER_BAR,
+  barsOf,
+  decodeSong,
+  defaultName,
+  demoSong,
+  emptyNotes,
+  encodeSong,
+  findSection,
+  freeId,
+  localStepIn,
+  newSection,
+  previewEvent,
+  randomNotes,
+  resize,
+  rowLabels,
+  sectionEvents,
+  sectionSlots,
+  songEnd,
+  songEventsAt,
+  spanAt,
+  spansOf,
+} from './song'
+import type { Length, Section, Song } from './song'
 import './App.css'
 
-const CELLS = ROWS * COLS
+type Mode = 'section' | 'song'
+
 const SIM = 6 // CSS pixels per water cell
-const MIN_BPM = 60
-const MAX_BPM = 180
-
-// [step, pitch] where pitch 0 is the lowest row
-const OPENING_TUNE: [number, number][] = [
-  [0, 0], [0, 7], [0, 10], [2, 9], [3, 8], [4, 3], [4, 10], [6, 12], [7, 11],
-  [8, 1], [8, 9], [10, 8], [11, 7], [12, 4], [12, 8], [13, 10], [14, 13], [15, 12],
-]
-
-const idx = (row: number, col: number) => row * COLS + col
-const pitchRow = (pitch: number) => ROWS - 1 - pitch
 const clamp = (v: number, lo: number, hi: number) => Math.min(hi, Math.max(lo, v))
 
-function openingTune() {
-  const g = new Array<boolean>(CELLS).fill(false)
-  for (const [step, pitch] of OPENING_TUNE) g[idx(pitchRow(pitch), step)] = true
-  return g
+// The sound, the water and the note flashes live outside React: they change
+// every frame and nothing on screen re-renders from them directly.
+const engine = new Engine()
+const water = new Water()
+const flash = new Float32Array(ROWS * 64)
+const view = { board: null as HTMLDivElement | null, reduce: false, cols: 16, pageStart: 0 }
+
+const amp = (strength: number) => (view.reduce ? strength * 0.35 : strength)
+
+function dropAtCell(row: number, col: number, strength: number) {
+  const el = view.board
+  if (!el) return
+  const r = el.getBoundingClientRect()
+  const cw = r.width / view.cols
+  const ch = r.height / ROWS
+  const x = r.left + (col + 0.5) * cw
+  const y = r.top + (row + 0.5) * ch
+  water.drop(x / SIM + 0.5, y / SIM + 0.5, (Math.min(cw, ch) / SIM) * 0.55 + 0.6, amp(strength))
 }
 
-function randomTune() {
-  const g = new Array<boolean>(CELLS).fill(false)
-  let pitch = 8 + Math.floor(Math.random() * 5) - 2
-  for (let c = 0; c < COLS; c++) {
-    if (Math.random() < 0.78) {
-      pitch = clamp(pitch + Math.floor(Math.random() * 7) - 3, 5, 15)
-      g[idx(pitchRow(pitch), c)] = true
-      if (Math.random() < 0.2) g[idx(pitchRow(pitch - 2 - Math.round(Math.random())), c)] = true
-    }
-    if (c % 4 === 0 && Math.random() < 0.85) {
-      g[idx(pitchRow(Math.floor(Math.random() * 5)), c)] = true
-    }
-  }
-  return g
-}
-
-function encode(grid: boolean[], scale: number, bpm: number) {
-  let hex = ''
-  for (let i = 0; i < CELLS; i += 4) {
-    let n = 0
-    for (let b = 0; b < 4; b++) if (grid[i + b]) n |= 1 << b
-    hex += n.toString(16)
-  }
-  return `${hex}.${scale}.${bpm}`
-}
-
-function decode(hash: string) {
-  const m = /^#?([0-9a-f]{64})\.(\d)\.(\d{2,3})$/.exec(hash)
-  if (!m) return null
-  const grid = new Array<boolean>(CELLS).fill(false)
-  for (let i = 0; i < 64; i++) {
-    const n = parseInt(m[1][i], 16)
-    for (let b = 0; b < 4; b++) grid[i * 4 + b] = Boolean(n & (1 << b))
-  }
-  return {
-    grid,
-    scale: clamp(Number(m[2]), 0, SCALES.length - 1),
-    bpm: clamp(Number(m[3]), MIN_BPM, MAX_BPM),
-  }
+function rippleStrength(e: NoteEvent) {
+  if (e.instrument !== 'drums') return { bell: 6, pluck: 5, pad: 4, bass: 6 }[e.instrument]
+  const n = ROWS - 1 - e.row
+  if (n <= 2) return 9 // kicks
+  if (n <= 5) return 6 // toms
+  if (n <= 8) return 5 // snare, rim, clap
+  if (n <= 12) return 2.2 // shaker and hats
+  return 3.5
 }
 
 function hexToRgb(hex: string): RGB {
@@ -80,10 +86,21 @@ function readPalette() {
     hi: hexToRgb(v('--water-hi')),
     lo: hexToRgb(v('--water-lo')),
     dot: v('--ink'),
-    petal: v('--petal'),
-    petalHi: v('--petal-hi'),
+    flash: v('--flash'),
+    sections: Array.from({ length: MAX_SECTIONS }, (_, i) => v(`--s${i}`)),
   }
 }
+
+function formatTime(seconds: number) {
+  const s = Math.max(0, Math.floor(seconds))
+  return `${Math.floor(s / 60)}:${String(s % 60).padStart(2, '0')}`
+}
+
+function saveToUrl(song: Song) {
+  window.history.replaceState(null, '', `#${encodeSong(song)}`)
+}
+
+const tint = (id: number) => ({ '--c': `var(--s${id})` }) as CSSProperties
 
 function PlayIcon({ playing }: { playing: boolean }) {
   return (
@@ -100,75 +117,66 @@ function PlayIcon({ playing }: { playing: boolean }) {
   )
 }
 
-// The sound, the water and the note flashes live outside React: they change
-// every frame and nothing on screen re-renders from them directly.
-const engine = new Engine()
-const water = new Water()
-const flash = new Float32Array(CELLS)
-const view = { board: null as HTMLDivElement | null, reduce: false }
-
-const amp = (strength: number) => (view.reduce ? strength * 0.35 : strength)
-
-function dropAtCell(row: number, col: number, strength: number) {
-  const el = view.board
-  if (!el) return
-  const r = el.getBoundingClientRect()
-  const size = r.width / COLS
-  const x = r.left + (col + 0.5) * size
-  const y = r.top + (row + 0.5) * size
-  water.drop(x / SIM + 0.5, y / SIM + 0.5, (size / SIM) * 0.55, amp(strength))
-}
-
 export default function App() {
-  const [initial] = useState(() => decode(location.hash) ?? { grid: openingTune(), scale: 0, bpm: 108 })
-  const [grid, setGrid] = useState(initial.grid)
-  const [scale, setScale] = useState(initial.scale)
-  const [bpm, setBpm] = useState(initial.bpm)
+  const [initial] = useState(() => decodeSong(location.hash) ?? demoSong())
+  const [song, setSong] = useState(initial)
+  const [selectedId, setSelectedId] = useState(initial.sections[0].id)
+  const [mode, setMode] = useState<Mode>(initial.placements.length ? 'song' : 'section')
   const [playing, setPlaying] = useState(false)
+  const [page, setPage] = useState(0)
+  const [viewSteps, setViewSteps] = useState(32)
   const [focusIdx, setFocusIdx] = useState(0)
+  const [slotFocus, setSlotFocus] = useState(0)
+  const [hover, setHover] = useState<{ lane: number; slot: number } | null>(null)
   const [copyState, setCopyState] = useState<'idle' | 'copied' | 'failed'>('idle')
+  const [undoState, setUndoState] = useState({ undo: false, redo: false })
 
-  const gridRef = useRef(grid)
+  const songRef = useRef(song)
+  const selectedRef = useRef(selectedId)
+  const modeRef = useRef<Mode>(mode)
   const playingRef = useRef(false)
-  const playheadRef = useRef(-1)
+  const headRef = useRef(-1)
+  const cueRef = useRef(0)
+  const past = useRef<Song[]>([])
+  const future = useRef<Song[]>([])
   const canvasRef = useRef<HTMLCanvasElement>(null)
+  const songLineRef = useRef<HTMLDivElement>(null)
+  const timeRef = useRef<HTMLParagraphElement>(null)
   const cellEls = useRef<(HTMLButtonElement | null)[]>([])
-  const paintRef = useRef<{ value: boolean; last: number } | null>(null)
+  const slotEls = useRef<(HTMLButtonElement | null)[]>([])
+  const paintRef = useRef<{ value: boolean; last: number; recorded: boolean } | null>(null)
   const stirRef = useRef<{ x: number; y: number } | null>(null)
+  const renamingRef = useRef(false)
 
-  const commit = (next: boolean[]) => {
-    gridRef.current = next
-    setGrid(next)
-  }
+  const section = findSection(song, selectedId) ?? song.sections[0]
+  const cols = Math.min(section.steps, viewSteps)
+  const pages = section.steps / cols
+  const pageIdx = Math.min(page, pages - 1)
+  const pageStart = pageIdx * cols
+  const labels = rowLabels(section.instrument, song.scale)
+  const spans = spansOf(song)
+  const cellFocus = focusIdx < ROWS * cols ? focusIdx : 0
 
-  const setCell = (k: number, value: boolean) => {
-    if (gridRef.current[k] === value) return
-    const next = gridRef.current.slice()
-    next[k] = value
-    commit(next)
-    if (value) {
-      const row = Math.floor(k / COLS)
-      const col = k % COLS
-      engine.preview(row, col)
-      flash[k] = 0.7
-      dropAtCell(row, col, 3)
-    }
-  }
-
-  // Keep the engine in step with the controls, and the URL in step with the tune.
-  useEffect(() => {
-    engine.scale = SCALES[scale].steps
-  }, [scale])
+  // ---- keeping the outside world in step ---------------------------------------
 
   useEffect(() => {
-    engine.bpm = bpm
+    view.cols = cols
+    view.pageStart = pageStart
+    selectedRef.current = section.id
+  }, [cols, pageStart, section.id])
+
+  useEffect(() => {
+    engine.scale = SCALES[song.scale].steps
+  }, [song.scale])
+
+  useEffect(() => {
+    engine.bpm = song.bpm
     engine.retime()
-  }, [bpm])
+  }, [song.bpm])
 
   useEffect(() => {
-    gridRef.current = grid
-    history.replaceState(null, '', `#${encode(grid, scale, bpm)}`)
-  }, [grid, scale, bpm])
+    saveToUrl(song)
+  }, [song])
 
   useEffect(() => {
     if (copyState === 'idle') return
@@ -176,7 +184,196 @@ export default function App() {
     return () => window.clearTimeout(t)
   }, [copyState])
 
-  // The water and the board are drawn on one canvas behind the page.
+  // Show 32 steps when the board is wide enough for them, otherwise 16.
+  useEffect(() => {
+    const el = view.board
+    if (!el) return
+    const ro = new ResizeObserver(([entry]) => {
+      setViewSteps(entry.contentRect.width / 32 >= 20 ? 32 : 16)
+    })
+    ro.observe(el)
+    return () => ro.disconnect()
+  }, [])
+
+  // ---- editing, with undo ----------------------------------------------------------
+
+  const syncUndo = () => setUndoState({ undo: past.current.length > 0, redo: future.current.length > 0 })
+
+  const apply = (next: Song, record = true) => {
+    if (record) {
+      past.current.push(songRef.current)
+      if (past.current.length > 200) past.current.shift()
+      future.current = []
+      syncUndo()
+    }
+    songRef.current = next
+    setSong(next)
+  }
+
+  // Undo is for notes, sections and the song. Tempo, scale and the mixer stay as they are.
+  const keepSettings = (target: Song, cur: Song): Song => ({
+    ...target,
+    bpm: cur.bpm,
+    scale: cur.scale,
+    sections: target.sections.map((s) => {
+      const c = findSection(cur, s.id)
+      return c ? { ...s, volume: c.volume, muted: c.muted } : s
+    }),
+  })
+
+  const undo = () => {
+    const prev = past.current.pop()
+    if (!prev) return
+    future.current.push(songRef.current)
+    const next = keepSettings(prev, songRef.current)
+    songRef.current = next
+    setSong(next)
+    syncUndo()
+  }
+
+  const redo = () => {
+    const nxt = future.current.pop()
+    if (!nxt) return
+    past.current.push(songRef.current)
+    const next = keepSettings(nxt, songRef.current)
+    songRef.current = next
+    setSong(next)
+    syncUndo()
+  }
+
+  const updateSection = (id: number, fn: (s: Section) => Section, record = true) => {
+    const cur = songRef.current
+    apply({ ...cur, sections: cur.sections.map((s) => (s.id === id ? fn(s) : s)) }, record)
+  }
+
+  const select = (id: number) => {
+    setSelectedId(id)
+    selectedRef.current = id
+    setPage(0)
+    setFocusIdx(0)
+    flash.fill(0)
+  }
+
+  /** k is a cell on screen: row × cols + column. Returns whether anything changed. */
+  const setCell = (k: number, value: boolean, record: boolean) => {
+    const row = Math.floor(k / cols)
+    const col = k % cols
+    const step = pageStart + col
+    const sec = findSection(songRef.current, section.id)
+    if (!sec) return false
+    const ni = row * sec.steps + step
+    if (sec.notes[ni] === value) return false
+    updateSection(
+      sec.id,
+      (s) => {
+        const notes = s.notes.slice()
+        notes[ni] = value
+        return { ...s, notes }
+      },
+      record,
+    )
+    if (value) {
+      engine.preview(previewEvent(sec, row, step))
+      flash[k] = 0.7
+      dropAtCell(row, col, 3)
+    }
+    return true
+  }
+
+  const addSection = () => {
+    const cur = songRef.current
+    const id = freeId(cur)
+    if (id < 0) return
+    apply({ ...cur, sections: [...cur.sections, newSection(id)] })
+    select(id)
+  }
+
+  const duplicateSection = () => {
+    const cur = songRef.current
+    const id = freeId(cur)
+    if (id < 0) return
+    const copy: Section = { ...section, id, name: `${section.name} 2`.slice(0, 16), notes: section.notes.slice() }
+    const at = cur.sections.findIndex((s) => s.id === section.id)
+    const sections = [...cur.sections]
+    sections.splice(at + 1, 0, copy)
+    apply({ ...cur, sections })
+    select(id)
+  }
+
+  const deleteSection = () => {
+    const cur = songRef.current
+    if (cur.sections.length <= 1) return
+    const at = cur.sections.findIndex((s) => s.id === section.id)
+    const sections = cur.sections.filter((s) => s.id !== section.id)
+    apply({ ...cur, sections, placements: cur.placements.filter((p) => p.section !== section.id) })
+    select(sections[Math.min(at, sections.length - 1)].id)
+  }
+
+  const setLength = (steps: Length) => {
+    if (steps === section.steps) return
+    updateSection(section.id, (s) => resize(s, steps))
+    setPage(0)
+  }
+
+  const rename = (name: string) => {
+    updateSection(section.id, (s) => ({ ...s, name }), !renamingRef.current)
+    renamingRef.current = true
+  }
+
+  /** Click an empty slot to place the selected section; click a block to take it out. */
+  const toggleSlot = (lane: number, slot: number) => {
+    const cur = songRef.current
+    const hit = spanAt(cur, lane, slot)
+    if (hit) {
+      apply({ ...cur, placements: cur.placements.filter((p) => !(p.lane === hit.lane && p.slot === hit.slot)) })
+      return
+    }
+    const len = sectionSlots(section)
+    const kept = cur.placements.filter((p) => !(p.lane === lane && p.slot > slot && p.slot < slot + len))
+    apply({ ...cur, placements: [...kept, { lane, slot, section: section.id }] })
+  }
+
+  // ---- playback --------------------------------------------------------------------
+
+  const togglePlay = () => {
+    if (playingRef.current) {
+      engine.stop()
+      playingRef.current = false
+      // Pausing a song keeps your place; Play carries on from there.
+      if (modeRef.current === 'song' && headRef.current >= 0) {
+        cueRef.current = headRef.current + 1 < engine.length() ? headRef.current + 1 : 0
+      }
+      headRef.current = -1
+      setPlaying(false)
+    } else {
+      const from = modeRef.current === 'song' && cueRef.current < engine.length() ? cueRef.current : 0
+      engine.start(from)
+      playingRef.current = true
+      setPlaying(true)
+    }
+  }
+
+  const changeMode = (m: Mode) => {
+    if (m === modeRef.current) return
+    modeRef.current = m
+    setMode(m)
+    if (playingRef.current) {
+      engine.seek(m === 'song' ? cueRef.current : 0)
+      headRef.current = -1
+    }
+  }
+
+  const playFrom = (slot: number) => {
+    cueRef.current = slot * SLOT_STEPS
+    if (modeRef.current !== 'song') changeMode('song')
+    else if (playingRef.current) {
+      engine.seek(cueRef.current)
+      headRef.current = -1
+    }
+  }
+
+  // ---- the water and the board, drawn on one canvas behind the page --------------------
+
   useEffect(() => {
     const canvas = canvasRef.current
     const ctx = canvas?.getContext('2d')
@@ -185,10 +382,20 @@ export default function App() {
     const offCtx = off.getContext('2d')
     if (!offCtx) return
 
-    engine.getColumn = (c) => {
-      const rows: number[] = []
-      for (let r = 0; r < ROWS; r++) if (gridRef.current[idx(r, c)]) rows.push(r)
-      return rows
+    engine.source = (step) => {
+      const s = songRef.current
+      if (modeRef.current === 'section') {
+        const sec = findSection(s, selectedRef.current)
+        const out: NoteEvent[] = []
+        if (sec) sectionEvents(sec, step % sec.steps, out)
+        return out
+      }
+      return songEventsAt(s, step)
+    }
+    engine.length = () => {
+      const s = songRef.current
+      if (modeRef.current === 'section') return findSection(s, selectedRef.current)?.steps ?? 16
+      return Math.max(1, songEnd(s)) * SLOT_STEPS
     }
 
     let pal = readPalette()
@@ -202,7 +409,7 @@ export default function App() {
 
     let img = offCtx.createImageData(1, 1)
     let dpr = 1
-    const resize = () => {
+    const resizeCanvas = () => {
       dpr = Math.min(window.devicePixelRatio || 1, 2)
       canvas.width = Math.round(innerWidth * dpr)
       canvas.height = Math.round(innerHeight * dpr)
@@ -213,18 +420,18 @@ export default function App() {
       off.height = h
       img = offCtx.createImageData(w, h)
     }
-    resize()
-    window.addEventListener('resize', resize)
+    resizeCanvas()
+    window.addEventListener('resize', resizeCanvas)
 
     // One drop in the middle of the board when the page opens.
-    const opening = window.setTimeout(() => {
-      dropAtCell(ROWS / 2, COLS / 2, 9)
-    }, 350)
+    const opening = window.setTimeout(() => dropAtCell(ROWS / 2, Math.floor(view.cols / 2), 9), 350)
 
     let raf = 0
     let last = performance.now()
     let acc = 0
     let sincePalette = 0
+    let shownTime = ''
+
     const frame = (now: number) => {
       const dt = Math.min(now - last, 100)
       last = now
@@ -241,11 +448,17 @@ export default function App() {
       if (actx && playingRef.current) {
         while (engine.queue.length && engine.queue[0].time <= actx.currentTime) {
           const t = engine.queue.shift()!
-          playheadRef.current = t.step
+          headRef.current = t.step
           if (actx.currentTime - t.time > 0.25) continue // the tab was hidden; skip stale ripples
-          for (const r of t.rows) {
-            flash[idx(r, t.step)] = 1
-            dropAtCell(r, t.step, 6)
+          for (const e of t.events) {
+            const col = e.local - view.pageStart
+            if (e.section === selectedRef.current && col >= 0 && col < view.cols) {
+              flash[e.row * view.cols + col] = 1
+              dropAtCell(e.row, col, rippleStrength(e))
+            } else {
+              // Sections you aren't looking at still stir the water, more gently.
+              dropAtCell(e.row, e.local % view.cols, rippleStrength(e) * 0.45)
+            }
           }
         }
       }
@@ -262,20 +475,33 @@ export default function App() {
       ctx.imageSmoothingQuality = 'high'
       ctx.drawImage(off, -SIM, -SIM, water.w * SIM, water.h * SIM)
 
+      const s = songRef.current
+      const sec = findSection(s, selectedRef.current) ?? s.sections[0]
       const board = view.board
-      if (board) {
+      if (board && sec) {
         const rect = board.getBoundingClientRect()
-        const size = rect.width / COLS
+        const { cols: vc, pageStart: ps } = view
+        const cw = rect.width / vc
+        const ch = rect.height / ROWS
+        const size = Math.min(cw, ch)
         const { w, cur } = water
         const decay = Math.exp(-dt / 220)
         const bend = view.reduce ? 0 : 1.6
-        const head = playingRef.current ? playheadRef.current : -1
 
+        let head = -1
+        if (playingRef.current && headRef.current >= 0) {
+          const local =
+            modeRef.current === 'section' ? headRef.current : localStepIn(s, sec.id, headRef.current)
+          if (local >= 0) head = local - ps
+        }
+
+        const color = pal.sections[sec.id] || pal.dot
         for (let r = 0; r < ROWS; r++) {
-          for (let c = 0; c < COLS; c++) {
-            const k = idx(r, c)
-            const cx = rect.left + (c + 0.5) * size
-            const cy = rect.top + (r + 0.5) * size
+          for (let c = 0; c < vc; c++) {
+            const k = r * vc + c
+            const step = ps + c
+            const cx = rect.left + (c + 0.5) * cw
+            const cy = rect.top + (r + 0.5) * ch
             const sx = Math.round(cx / SIM + 0.5)
             const sy = Math.round(cy / SIM + 0.5)
             const i = clamp(sy, 1, water.h - 2) * w + clamp(sx, 1, w - 2)
@@ -286,27 +512,45 @@ export default function App() {
             flash[k] = f * decay
 
             ctx.beginPath()
-            if (gridRef.current[k]) {
-              const d = size * (0.58 + f * 0.16 + lift * 0.06)
+            if (sec.notes[r * sec.steps + step]) {
+              const d = size * (0.6 + f * 0.16 + lift * 0.06)
               ctx.arc(cx + ox, cy + oy, d / 2, 0, Math.PI * 2)
               ctx.globalAlpha = 1
-              ctx.fillStyle = pal.petal
+              ctx.fillStyle = color
               ctx.fill()
               if (f > 0.02) {
                 ctx.globalAlpha = f * 0.65
-                ctx.fillStyle = pal.petalHi
+                ctx.fillStyle = pal.flash
                 ctx.fill()
               }
             } else {
-              const d = size * (0.2 + lift * 0.24 + (c === head ? 0.08 : 0))
+              const onHead = c === head
+              const barStart = step % STEPS_PER_BAR === 0
+              const d = size * (0.2 + lift * 0.24 + (onHead ? 0.08 : 0))
               ctx.arc(cx + ox, cy + oy, d / 2, 0, Math.PI * 2)
-              ctx.globalAlpha = 0.16 + lift * 0.4 + (c === head ? 0.16 : 0)
+              ctx.globalAlpha = 0.15 + (barStart ? 0.1 : 0) + lift * 0.4 + (onHead ? 0.16 : 0)
               ctx.fillStyle = pal.dot
               ctx.fill()
             }
           }
         }
         ctx.globalAlpha = 1
+      }
+
+      // The song's playhead and clock.
+      const pos = playingRef.current && modeRef.current === 'song' ? Math.max(headRef.current, 0) : cueRef.current
+      const line = songLineRef.current
+      if (line) {
+        const width = line.parentElement?.clientWidth ?? 0
+        line.style.transform = `translateX(${(pos / (SLOTS * SLOT_STEPS)) * width}px)`
+      }
+      const clock = timeRef.current
+      if (clock) {
+        const text = `${formatTime(pos * engine.stepDur)} / ${formatTime(songEnd(s) * SLOT_STEPS * engine.stepDur)}`
+        if (text !== shownTime) {
+          clock.textContent = text
+          shownTime = text
+        }
       }
 
       raf = requestAnimationFrame(frame)
@@ -316,31 +560,32 @@ export default function App() {
     return () => {
       cancelAnimationFrame(raf)
       window.clearTimeout(opening)
-      window.removeEventListener('resize', resize)
+      window.removeEventListener('resize', resizeCanvas)
       dark.removeEventListener('change', onScheme)
       reduce.removeEventListener('change', onReduce)
       engine.stop()
     }
   }, [])
 
-  const togglePlay = () => {
-    if (playingRef.current) {
-      engine.stop()
-      playingRef.current = false
-      playheadRef.current = -1
-      setPlaying(false)
-    } else {
-      engine.start()
-      playingRef.current = true
-      setPlaying(true)
-    }
-  }
+  // ---- keyboard shortcuts ------------------------------------------------------------
 
-  // Space plays and pauses unless a control has focus.
   useEffect(() => {
     const onKey = (e: globalThis.KeyboardEvent) => {
-      if ((e.key !== ' ' && e.code !== 'Space') || e.repeat) return
       const t = e.target
+      const typing = t instanceof HTMLInputElement ? t.type === 'text' : t instanceof HTMLTextAreaElement
+      const mod = e.metaKey || e.ctrlKey
+      if (mod && !typing && e.key.toLowerCase() === 'z') {
+        e.preventDefault()
+        if (e.shiftKey) redo()
+        else undo()
+        return
+      }
+      if (mod && !typing && e.key.toLowerCase() === 'y') {
+        e.preventDefault()
+        redo()
+        return
+      }
+      if ((e.key !== ' ' && e.code !== 'Space') || e.repeat) return
       if (t instanceof Element && t.closest('button, input, select, textarea, label')) return
       e.preventDefault()
       togglePlay()
@@ -349,14 +594,16 @@ export default function App() {
     return () => window.removeEventListener('keydown', onKey)
   })
 
+  // ---- the note board ------------------------------------------------------------------
+
   const cellFromPoint = (e: PointerEvent) => {
     const el = view.board
     if (!el) return -1
     const r = el.getBoundingClientRect()
-    const col = Math.floor(((e.clientX - r.left) / r.width) * COLS)
+    const col = Math.floor(((e.clientX - r.left) / r.width) * cols)
     const row = Math.floor(((e.clientY - r.top) / r.height) * ROWS)
-    if (col < 0 || row < 0 || col >= COLS || row >= ROWS) return -1
-    return idx(row, col)
+    if (col < 0 || row < 0 || col >= cols || row >= ROWS) return -1
+    return row * cols + col
   }
 
   const onBoardDown = (e: PointerEvent<HTMLDivElement>) => {
@@ -368,10 +615,11 @@ export default function App() {
     } catch {
       // Some synthetic pointers can't be captured; drawing still works without it.
     }
-    const value = !gridRef.current[k]
-    paintRef.current = { value, last: k }
+    const step = pageStart + (k % cols)
+    const value = !section.notes[Math.floor(k / cols) * section.steps + step]
+    const changed = setCell(k, value, true)
+    paintRef.current = { value, last: k, recorded: changed }
     setFocusIdx(k)
-    setCell(k, value)
   }
 
   const onBoardMove = (e: PointerEvent<HTMLDivElement>) => {
@@ -380,10 +628,10 @@ export default function App() {
     const k = cellFromPoint(e)
     if (k < 0 || k === paint.last) return
     // Fill every cell between the last one and this one, so a quick stroke leaves no gaps.
-    let r0 = Math.floor(paint.last / COLS)
-    let c0 = paint.last % COLS
-    const r1 = Math.floor(k / COLS)
-    const c1 = k % COLS
+    let r0 = Math.floor(paint.last / cols)
+    let c0 = paint.last % cols
+    const r1 = Math.floor(k / cols)
+    const c1 = k % cols
     const dr = Math.abs(r1 - r0)
     const dc = Math.abs(c1 - c0)
     const sr = r0 < r1 ? 1 : -1
@@ -399,7 +647,7 @@ export default function App() {
         err += dc
         r0 += sr
       }
-      setCell(idx(r0, c0), paint.value)
+      if (setCell(r0 * cols + c0, paint.value, !paint.recorded)) paint.recorded = true
     }
     paint.last = k
   }
@@ -409,19 +657,35 @@ export default function App() {
   }
 
   const onBoardKey = (e: KeyboardEvent<HTMLDivElement>) => {
-    const row = Math.floor(focusIdx / COLS)
-    const col = focusIdx % COLS
+    const row = Math.floor(cellFocus / cols)
+    const col = cellFocus % cols
     let next = -1
-    if (e.key === 'ArrowUp') next = idx(clamp(row - 1, 0, ROWS - 1), col)
-    else if (e.key === 'ArrowDown') next = idx(clamp(row + 1, 0, ROWS - 1), col)
-    else if (e.key === 'ArrowLeft') next = idx(row, clamp(col - 1, 0, COLS - 1))
-    else if (e.key === 'ArrowRight') next = idx(row, clamp(col + 1, 0, COLS - 1))
-    else if (e.key === 'Home') next = idx(row, 0)
-    else if (e.key === 'End') next = idx(row, COLS - 1)
+    if (e.key === 'ArrowUp') next = clamp(row - 1, 0, ROWS - 1) * cols + col
+    else if (e.key === 'ArrowDown') next = clamp(row + 1, 0, ROWS - 1) * cols + col
+    else if (e.key === 'ArrowLeft') next = row * cols + clamp(col - 1, 0, cols - 1)
+    else if (e.key === 'ArrowRight') next = row * cols + clamp(col + 1, 0, cols - 1)
+    else if (e.key === 'Home') next = row * cols
+    else if (e.key === 'End') next = row * cols + cols - 1
     if (next < 0) return
     e.preventDefault()
     setFocusIdx(next)
     cellEls.current[next]?.focus()
+  }
+
+  const onLanesKey = (e: KeyboardEvent<HTMLDivElement>) => {
+    const lane = Math.floor(slotFocus / SLOTS)
+    const slot = slotFocus % SLOTS
+    let next = -1
+    if (e.key === 'ArrowUp') next = clamp(lane - 1, 0, LANES - 1) * SLOTS + slot
+    else if (e.key === 'ArrowDown') next = clamp(lane + 1, 0, LANES - 1) * SLOTS + slot
+    else if (e.key === 'ArrowLeft') next = lane * SLOTS + clamp(slot - 1, 0, SLOTS - 1)
+    else if (e.key === 'ArrowRight') next = lane * SLOTS + clamp(slot + 1, 0, SLOTS - 1)
+    else if (e.key === 'Home') next = lane * SLOTS
+    else if (e.key === 'End') next = lane * SLOTS + SLOTS - 1
+    if (next < 0) return
+    e.preventDefault()
+    setSlotFocus(next)
+    slotEls.current[next]?.focus()
   }
 
   // Stirring the open water with a finger or the mouse.
@@ -448,7 +712,9 @@ export default function App() {
     }
   }
 
-  const noteCount = grid.filter(Boolean).length
+  const instrumentName = (s: Section) => INSTRUMENTS.find((i) => i.id === s.instrument)?.name ?? ''
+  const ghostLen =
+    hover && !spanAt(song, hover.lane, hover.slot) ? Math.min(sectionSlots(section), SLOTS - hover.slot) : 0
 
   return (
     <>
@@ -465,96 +731,339 @@ export default function App() {
       <main className="pond">
         <h1 className="title">Pond</h1>
 
-        {/* Mouse-down is cancelled so cells never take focus from a click, and Space still plays. */}
-        <div
-          ref={(el) => {
-            view.board = el
-          }}
-          className="board"
-          role="group"
-          aria-label={`Note grid, ${noteCount} notes`}
-          onMouseDown={(e) => e.preventDefault()}
-          onPointerDown={onBoardDown}
-          onPointerMove={onBoardMove}
-          onPointerUp={endPaint}
-          onPointerCancel={endPaint}
-          onKeyDown={onBoardKey}
-        >
-          {grid.map((on, k) => (
-            <button
-              key={k}
-              ref={(el) => {
-                cellEls.current[k] = el
-              }}
-              type="button"
-              className="cell"
-              tabIndex={k === focusIdx ? 0 : -1}
-              aria-pressed={on}
-              aria-label={`Step ${(k % COLS) + 1}, pitch ${ROWS - Math.floor(k / COLS)}`}
-              onFocus={() => setFocusIdx(k)}
-              onClick={(e) => {
-                // Pointer presses are handled on the board so you can drag to draw.
-                if (e.detail === 0) setCell(k, !on)
-              }}
-            />
-          ))}
-        </div>
+        <div className="studio">
+          <div className="transport">
+            <button type="button" className="play" onClick={togglePlay}>
+              <PlayIcon playing={playing} />
+              {playing ? 'Pause' : 'Play'}
+            </button>
 
-        <div className="panel">
-          <button type="button" className="play" onClick={togglePlay}>
-            <PlayIcon playing={playing} />
-            {playing ? 'Pause' : 'Play'}
-          </button>
+            <div className="seg" role="group" aria-label="What to play">
+              <button
+                type="button"
+                aria-pressed={mode === 'section'}
+                title="Loop the section you're editing"
+                onClick={() => changeMode('section')}
+              >
+                Section
+              </button>
+              <button
+                type="button"
+                aria-pressed={mode === 'song'}
+                title="Play the whole song"
+                onClick={() => changeMode('song')}
+              >
+                Song
+              </button>
+            </div>
 
-          <label className="tempo">
-            <span>Tempo</span>
-            <input
-              type="range"
-              min={MIN_BPM}
-              max={MAX_BPM}
-              value={bpm}
-              onChange={(e) => setBpm(Number(e.target.value))}
-            />
-            <output>{bpm} bpm</output>
-          </label>
+            <label className="tempo">
+              <span>Tempo</span>
+              <input
+                type="range"
+                min={MIN_BPM}
+                max={MAX_BPM}
+                value={song.bpm}
+                onChange={(e) => apply({ ...songRef.current, bpm: Number(e.target.value) }, false)}
+              />
+              <output>{song.bpm} bpm</output>
+            </label>
 
-          <div className="scales">
-            <span id="scale-label">Scale</span>
-            <div className="scale-options" role="group" aria-labelledby="scale-label">
-              {SCALES.map((s, i) => (
-                <button
-                  key={s.name}
-                  type="button"
-                  title={s.detail}
-                  aria-pressed={scale === i}
-                  onClick={() => setScale(i)}
-                >
-                  {s.name}
-                </button>
-              ))}
+            <div className="opt" role="group" aria-labelledby="scale-label">
+              <span id="scale-label">Scale</span>
+              <div className="toggles">
+                {SCALES.map((s, i) => (
+                  <button
+                    key={s.name}
+                    type="button"
+                    title={s.detail}
+                    aria-pressed={song.scale === i}
+                    onClick={() => apply({ ...songRef.current, scale: i }, false)}
+                  >
+                    {s.name}
+                  </button>
+                ))}
+              </div>
             </div>
           </div>
 
-          <p className="hint">
-            Draw on the grid to place notes. Higher rows ring higher. Space plays and pauses.
-          </p>
+          <div className="editor" style={tint(section.id)}>
+            <div className="editor-head">
+              <span className="swatch" aria-hidden="true" />
+              <input
+                className="section-name"
+                aria-label="Section name"
+                value={section.name}
+                maxLength={16}
+                spellCheck={false}
+                onFocus={() => (renamingRef.current = false)}
+                onChange={(e) => rename(e.target.value)}
+                onBlur={() => {
+                  if (!section.name.trim()) updateSection(section.id, (s) => ({ ...s, name: defaultName(s.id) }), false)
+                }}
+              />
+              <div className="text-actions">
+                <button
+                  type="button"
+                  onClick={() => updateSection(section.id, (s) => ({ ...s, notes: randomNotes(s.instrument, s.steps) }))}
+                >
+                  Randomize
+                </button>
+                <button type="button" onClick={() => updateSection(section.id, (s) => ({ ...s, notes: emptyNotes(s.steps) }))}>
+                  Clear
+                </button>
+                <button type="button" onClick={duplicateSection} disabled={song.sections.length >= MAX_SECTIONS}>
+                  Duplicate
+                </button>
+                <button type="button" onClick={deleteSection} disabled={song.sections.length <= 1}>
+                  Delete
+                </button>
+              </div>
+            </div>
 
-          <div className="actions">
-            <button type="button" onClick={() => commit(randomTune())}>
-              Randomize
-            </button>
-            <button type="button" onClick={() => commit(new Array<boolean>(CELLS).fill(false))}>
-              Clear
-            </button>
-            <button type="button" onClick={copyLink} aria-live="polite">
-              {copyState === 'copied'
-                ? 'Link copied'
-                : copyState === 'failed'
-                  ? 'Copy from the address bar'
-                  : 'Copy link'}
-            </button>
+            <div className="editor-options">
+              <div className="opt" role="group" aria-labelledby="sound-label">
+                <span id="sound-label">Sound</span>
+                <div className="toggles">
+                  {INSTRUMENTS.map((inst) => (
+                    <button
+                      key={inst.id}
+                      type="button"
+                      aria-pressed={section.instrument === inst.id}
+                      onClick={() => updateSection(section.id, (s) => ({ ...s, instrument: inst.id }))}
+                    >
+                      {inst.name}
+                    </button>
+                  ))}
+                </div>
+              </div>
+
+              <div className="opt" role="group" aria-labelledby="length-label">
+                <span id="length-label">Length</span>
+                <div className="toggles">
+                  {LENGTHS.map((len) => (
+                    <button key={len} type="button" aria-pressed={section.steps === len} onClick={() => setLength(len)}>
+                      {barsOf(len)} bars
+                    </button>
+                  ))}
+                </div>
+              </div>
+
+              {pages > 1 && (
+                <div className="opt" role="group" aria-labelledby="page-label">
+                  <span id="page-label">Showing</span>
+                  <div className="toggles">
+                    {Array.from({ length: pages }, (_, p) => (
+                      <button key={p} type="button" aria-pressed={pageIdx === p} onClick={() => setPage(p)}>
+                        Bars {barsOf(p * cols) + 1}–{barsOf((p + 1) * cols)}
+                      </button>
+                    ))}
+                  </div>
+                </div>
+              )}
+            </div>
+
+            <div className="editor-board">
+              <div className="row-labels" aria-hidden="true">
+                {labels.map((l, r) => (
+                  <span key={r}>{l}</span>
+                ))}
+              </div>
+
+              {/* Mouse-down is cancelled so cells never take focus from a click, and Space still plays. */}
+              <div
+                ref={(el) => {
+                  view.board = el
+                }}
+                className="board"
+                role="group"
+                aria-label={`${section.name} notes`}
+                style={{ gridTemplateColumns: `repeat(${cols}, 1fr)` }}
+                onMouseDown={(e) => e.preventDefault()}
+                onPointerDown={onBoardDown}
+                onPointerMove={onBoardMove}
+                onPointerUp={endPaint}
+                onPointerCancel={endPaint}
+                onKeyDown={onBoardKey}
+              >
+                {Array.from({ length: ROWS * cols }, (_, k) => {
+                  const row = Math.floor(k / cols)
+                  const step = pageStart + (k % cols)
+                  const on = section.notes[row * section.steps + step]
+                  return (
+                    <button
+                      key={k}
+                      ref={(el) => {
+                        cellEls.current[k] = el
+                      }}
+                      type="button"
+                      className="cell"
+                      tabIndex={k === cellFocus ? 0 : -1}
+                      aria-pressed={on}
+                      aria-label={`${labels[row]}, step ${step + 1}`}
+                      onFocus={() => setFocusIdx(k)}
+                      onClick={(e) => {
+                        // Pointer presses are handled on the board so you can drag to draw.
+                        if (e.detail === 0) setCell(k, !on, true)
+                      }}
+                    />
+                  )
+                })}
+              </div>
+            </div>
           </div>
+
+          <section className="song" aria-labelledby="song-label">
+            <div className="song-head">
+              <h2 id="song-label">Song</h2>
+              <p className="song-time" ref={timeRef}>
+                0:00 / 0:00
+              </p>
+            </div>
+            <div className="lanes-scroll">
+              <div className="lanes" onKeyDown={onLanesKey} onPointerLeave={() => setHover(null)}>
+                <div className="ruler">
+                  {Array.from({ length: SLOTS }, (_, slot) => (
+                    <button
+                      key={slot}
+                      type="button"
+                      tabIndex={-1}
+                      data-mark={slot % 4 === 0 || undefined}
+                      aria-label={`Play from bar ${slot * 2 + 1}`}
+                      onClick={() => playFrom(slot)}
+                    >
+                      {slot % 4 === 0 ? slot * 2 + 1 : ''}
+                    </button>
+                  ))}
+                </div>
+
+                {Array.from({ length: LANES }, (_, lane) => (
+                  <div key={lane} className="lane" role="group" aria-label={`Lane ${lane + 1}`}>
+                    {Array.from({ length: SLOTS }, (_, slot) => {
+                      const k = lane * SLOTS + slot
+                      const hit = spanAt(song, lane, slot)
+                      const hitName = hit ? findSection(song, hit.section)?.name : ''
+                      return (
+                        <button
+                          key={slot}
+                          ref={(el) => {
+                            slotEls.current[k] = el
+                          }}
+                          type="button"
+                          className="slot"
+                          style={{ gridColumn: slot + 1 }}
+                          data-mark={slot % 4 === 0 || undefined}
+                          tabIndex={k === slotFocus ? 0 : -1}
+                          aria-label={
+                            hit
+                              ? `Lane ${lane + 1}, bar ${slot * 2 + 1}, ${hitName}. Remove it`
+                              : `Lane ${lane + 1}, bar ${slot * 2 + 1}, empty. Place ${section.name}`
+                          }
+                          onFocus={() => setSlotFocus(k)}
+                          onPointerEnter={() => setHover({ lane, slot })}
+                          onClick={() => toggleSlot(lane, slot)}
+                        />
+                      )
+                    })}
+                    {spans
+                      .filter((p) => p.lane === lane)
+                      .map((p) => {
+                        const s = findSection(song, p.section)
+                        if (!s) return null
+                        return (
+                          <div
+                            key={p.slot}
+                            className="block"
+                            aria-hidden="true"
+                            data-selected={s.id === section.id || undefined}
+                            style={{ ...tint(s.id), gridColumn: `${p.slot + 1} / span ${p.span}` }}
+                          >
+                            <span>{s.name}</span>
+                          </div>
+                        )
+                      })}
+                    {hover?.lane === lane && ghostLen > 0 && (
+                      <div
+                        className="ghost"
+                        aria-hidden="true"
+                        style={{ ...tint(section.id), gridColumn: `${hover.slot + 1} / span ${ghostLen}` }}
+                      />
+                    )}
+                  </div>
+                ))}
+                <div
+                  className="song-line"
+                  ref={songLineRef}
+                  data-hidden={mode !== 'song' || undefined}
+                  aria-hidden="true"
+                />
+              </div>
+            </div>
+          </section>
         </div>
+
+        <aside className="side" aria-labelledby="sections-label">
+          <h2 className="side-title" id="sections-label">
+            Sections
+          </h2>
+          <ul className="sections">
+            {song.sections.map((s) => (
+              <li key={s.id} className="section-row" style={tint(s.id)} data-selected={s.id === section.id || undefined}>
+                <button type="button" className="pick" aria-pressed={s.id === section.id} onClick={() => select(s.id)}>
+                  <span className="swatch" aria-hidden="true" />
+                  <span className="pick-text">
+                    <span className="pick-name">{s.name}</span>
+                    <span className="pick-meta">
+                      {instrumentName(s)}, {barsOf(s.steps)} bars
+                    </span>
+                  </span>
+                </button>
+                <div className="mix">
+                  <input
+                    type="range"
+                    min={0}
+                    max={100}
+                    value={Math.round(s.volume * 100)}
+                    aria-label={`${s.name} volume`}
+                    onChange={(e) =>
+                      updateSection(s.id, (x) => ({ ...x, volume: Number(e.target.value) / 100 }), false)
+                    }
+                  />
+                  <button
+                    type="button"
+                    className="mute"
+                    aria-pressed={s.muted}
+                    aria-label={`Mute ${s.name}`}
+                    onClick={() => updateSection(s.id, (x) => ({ ...x, muted: !x.muted }), false)}
+                  >
+                    Mute
+                  </button>
+                </div>
+              </li>
+            ))}
+          </ul>
+          <button type="button" className="add" onClick={addSection} disabled={song.sections.length >= MAX_SECTIONS}>
+            New section
+          </button>
+
+          <div className="side-foot">
+            <p className="hint">
+              Draw notes on the grid. In the song, click a slot to place the selected section and click a block to take
+              it out. Click a bar number to play from there.
+            </p>
+            <div className="text-actions">
+              <button type="button" onClick={undo} disabled={!undoState.undo}>
+                Undo
+              </button>
+              <button type="button" onClick={redo} disabled={!undoState.redo}>
+                Redo
+              </button>
+              <button type="button" onClick={copyLink} aria-live="polite">
+                {copyState === 'copied' ? 'Link copied' : copyState === 'failed' ? 'Copy from the address bar' : 'Copy link'}
+              </button>
+            </div>
+          </div>
+        </aside>
       </main>
     </>
   )
